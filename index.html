@@ -280,15 +280,12 @@ function renderChart(){
   let cb=0,cc=0; const avg=[];
   sorted.forEach(p=>{cb+=p.amount;cc+=p.cost; avg.push({t:p.t,v:cb?cc/cb:0});});
 
-  // punti visibili (+margine) per scala e performance
+  // punti visibili (+margine) solo per il tracciato della linea (performance)
   const pad=(view.t1-view.t0)*0.015;
   const vis=PRICE_PTS.filter(p=>p.t>=view.t0-pad && p.t<=view.t1+pad);
-  const visBuy=r.filter(p=>p.t>=view.t0 && p.t<=view.t1);
-  const visAvg=avg.filter(a=>a.t>=view.t0 && a.t<=view.t1);
-  const cvals=[...vis.map(p=>p.c), ...visBuy.map(p=>p.price), ...visAvg.map(a=>a.v)];
-  if(!cvals.length) cvals.push(cp);
-  let lo=Math.min(...cvals), hi=Math.max(...cvals);
-  if(cp>=lo*0.6 && cp<=hi*1.4){ lo=Math.min(lo,cp); hi=Math.max(hi,cp); } // includi "oggi" solo se vicino
+  // SCALA Y FISSA su tutto lo storico → lo zoom orizzontale non fa "saltare" il grafico
+  const allC=[...PRICE_PTS.map(p=>p.c), ...r.map(p=>p.price), ...avg.map(a=>a.v), cp];
+  let lo=Math.min(...allC), hi=Math.max(...allC);
 
   const x=t=>M.l+(t-view.t0)/(view.t1-view.t0)*PLOTW;
   let y;
@@ -361,12 +358,23 @@ function renderChart(){
 let rafPending=false;
 function scheduleRender(){ if(rafPending)return; rafPending=true; requestAnimationFrame(()=>{rafPending=false;renderChart();}); }
 function timeFromClient(clientX){ const rc=chartSvg.getBoundingClientRect(); const sx=(clientX-rc.left)/rc.width*W; return view.t0+(sx-M.l)/PLOTW*(view.t1-view.t0); }
+const MINSPAN=6*86400000;
+function clampView(t0,t1){
+  if(t1-t0<MINSPAN){const m=(t0+t1)/2;t0=m-MINSPAN/2;t1=m+MINSPAN/2;}
+  if(t0<DATA_T.min){t1+=DATA_T.min-t0;t0=DATA_T.min;}
+  if(t1>DATA_T.max){t0-=t1-DATA_T.max;t1=DATA_T.max;}
+  return {t0:Math.max(DATA_T.min,t0), t1:Math.min(DATA_T.max,t1)};
+}
 chartSvg.addEventListener('wheel',e=>{
   if(!view)return; e.preventDefault();
-  const tc=timeFromClient(e.clientX), f=e.deltaY<0?0.82:1.22;
-  let t0=tc-(tc-view.t0)*f, t1=tc+(view.t1-tc)*f;
-  t0=Math.max(DATA_T.min,t0); t1=Math.min(DATA_T.max,t1);
-  if(t1-t0>=6*86400000){ view={t0,t1}; scheduleRender(); }
+  const span=view.t1-view.t0, rc=chartSvg.getBoundingClientRect();
+  if(Math.abs(e.deltaX)>Math.abs(e.deltaY)){            // trackpad: scorri in orizzontale → pan
+    const dt=(e.deltaX/rc.width)*(W/PLOTW)*span;
+    view=clampView(view.t0+dt, view.t1+dt); scheduleRender(); return;
+  }
+  const tc=timeFromClient(e.clientX);                   // rotella verticale → zoom morbido ancorato al cursore
+  const base=0.9, f=e.deltaY<0?base:1/base;
+  view=clampView(tc-(tc-view.t0)*f, tc+(view.t1-tc)*f); scheduleRender();
 },{passive:false});
 let drag=null;
 chartSvg.addEventListener('pointerdown',e=>{ if(!view)return; drag={x:e.clientX,t0:view.t0,t1:view.t1}; chartSvg.setPointerCapture(e.pointerId); chartSvg.style.cursor='grabbing'; });
@@ -374,10 +382,7 @@ chartSvg.addEventListener('pointermove',e=>{
   if(!drag)return;
   const rc=chartSvg.getBoundingClientRect(), span=drag.t1-drag.t0;
   const dt=-((e.clientX-drag.x)/rc.width)*(W/PLOTW)*span;
-  let t0=drag.t0+dt, t1=drag.t1+dt;
-  if(t0<DATA_T.min){t1+=DATA_T.min-t0;t0=DATA_T.min;}
-  if(t1>DATA_T.max){t0-=t1-DATA_T.max;t1=DATA_T.max;}
-  view={t0,t1}; scheduleRender();
+  view=clampView(drag.t0+dt, drag.t1+dt); scheduleRender();
 });
 const endDrag=()=>{ if(drag){drag=null; chartSvg.style.cursor='grab';} };
 chartSvg.addEventListener('pointerup',endDrag); chartSvg.addEventListener('pointercancel',endDrag);
