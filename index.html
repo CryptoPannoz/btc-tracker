@@ -62,6 +62,7 @@
      position:sticky;top:0;background:var(--panel);cursor:pointer}
   th:first-child,td:first-child{text-align:left}
   td.del{text-align:center;cursor:pointer;color:var(--muted)} td.del:hover{color:var(--red)}
+  tbody tr{cursor:pointer}
   tbody tr:hover{background:#ffffff08}
   .tbl-scroll{max-height:430px;overflow:auto;border-radius:10px;border:1px solid var(--line)}
   .pill{font-size:11px;padding:2px 8px;border-radius:20px;background:var(--panel2);border:1px solid var(--line);color:var(--muted)}
@@ -146,9 +147,11 @@
       <div class="field"><label>Quantità BTC</label><input id="aAmount" type="number" step="0.00000001" placeholder="0.00500000"></div>
       <div class="field"><label>Prezzo BTC ($)</label><input id="aPrice" type="number" step="0.01" placeholder="90000"></div>
       <div class="field"><label>oppure Importo speso (€)</label><input id="aEur" type="number" step="0.01" placeholder="300"></div>
+      <div class="field"><label>Fee / commissione (€)</label><input id="aFee" type="number" step="0.01" placeholder="5.25"></div>
       <button class="primary" id="addBtn">Aggiungi</button>
+      <button id="cancelEdit" style="display:none">Annulla</button>
     </div>
-    <p class="note">Compila <b>Quantità BTC</b> + <b>Prezzo</b>. In alternativa inserisci <b>Importo €</b> + <b>Prezzo</b> e calcolo io i BTC (cambio $→€ applicato).</p>
+    <p class="note">Compila <b>Quantità BTC</b> + <b>Prezzo</b> (o <b>Importo €</b> + <b>Prezzo</b>). <b>Fee</b> = commissione in € (nei tuoi fogli si chiama <b>FEES</b>). 💡 <b>Clicca una riga del registro</b> per modificarla.</p>
   </div>
 
   <!-- TABLE -->
@@ -161,7 +164,7 @@
           <th data-k="amount">BTC</th><th data-k="sats">Sats</th>
           <th data-k="price">Prezzo $</th><th data-k="cost">Costo $</th>
           <th data-k="val">Valore oggi $</th><th data-k="pnl">P&amp;L $</th>
-          <th data-k="pnlp">P&amp;L %</th><th></th>
+          <th data-k="pnlp">P&amp;L %</th><th data-k="fee">Fee €</th><th></th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -191,7 +194,7 @@ function seedPurchases(){
   const _t=SEED_CSV.trim(); if(!_t) return [];
   return _t.split('\n').map((l,i)=>{
     const[date,ledger,amount,price]=l.split('|');
-    return {id:'s'+i, date, ledger, amount:+amount, price:+price};
+    return {id:'s'+i, date, ledger, amount:+amount, price:+price, fee:0};
   });
 }
 let state = load();
@@ -205,7 +208,7 @@ function save(){state.curPrice=+curPrice.value;state.fx=+fx.value;localStorage.s
 //============ ELEMENTS ============
 const curPrice=document.getElementById('curPrice'), fx=document.getElementById('fx');
 curPrice.value=state.curPrice; fx.value=state.fx;
-let scaleMode='lin'; let sortKey='t', sortDir=1;
+let scaleMode='lin'; let sortKey='t', sortDir=1; let editingId=null;
 
 //============ COMPUTE ============
 function rows(){
@@ -220,8 +223,9 @@ function totals(){
   const r=rows(), cp=+curPrice.value, f=+fx.value;
   const btc=r.reduce((s,x)=>s+x.amount,0);
   const cost=r.reduce((s,x)=>s+x.cost,0);
+  const feeTot=r.reduce((s,x)=>s+(+x.fee||0),0);
   const val=btc*cp, pnl=val-cost, adc=btc?cost/btc:0;
-  return {btc, sats:Math.round(btc*1e8), cost, val, pnl, pnlp:cost?pnl/cost*100:0, adc, cp, f, n:r.length};
+  return {btc, sats:Math.round(btc*1e8), cost, val, pnl, pnlp:cost?pnl/cost*100:0, adc, feeTot, cp, f, n:r.length};
 }
 
 //============ RENDER KPIs ============
@@ -235,6 +239,7 @@ function renderKpis(){
     ['Prezzo medio carico', fmtUSD(t.adc), `vs ${fmtUSD(t.cp)} oggi`],
     ['P&L cumulativo', `<span class="${cls(t.pnl)}">${sg(t.pnl)}${fmtUSD(t.pnl)}</span>`, `<span class="${cls(t.pnl)}">${sg(t.pnl)}${fmtEUR(t.pnl*f)}</span>`],
     ['P&L %', `<span class="${cls(t.pnl)}">${sg(t.pnlp)}${fmtNum(t.pnlp,2)}%</span>`, `${t.n} acquisti`],
+    ['Commissioni (FEES)', fmtEUR(t.feeTot||0), 'totale fee pagate'],
   ];
   document.getElementById('kpis').innerHTML=cards.map(c=>
     `<div class="kpi"><div class="k">${c[0]}</div><div class="v">${c[1]}</div><div class="e">${c[2]}</div></div>`).join('');
@@ -339,6 +344,29 @@ function renderChart(){
   g.appendChild(el('line',{x1:M.l,x2:W-M.r,y1:yc,y2:yc,stroke:'#3b9dff','stroke-width':1,'stroke-dasharray':'5 4','stroke-opacity':.7}));
   if(yc>M.t+8&&yc<H-M.b){const ct=el('text',{x:W-M.r-4,y:yc-5,fill:'#3b9dff','font-size':11,'text-anchor':'end'}); ct.textContent='oggi '+fmtUSD(cp); svg.appendChild(ct);}
 
+  // crosshair: muovendo il mouse mostra prezzo BTC e prezzo medio del giorno
+  const gCross=el('g',{style:'pointer-events:none'});
+  const ovl=el('rect',{x:M.l,y:M.t,width:PLOTW,height:PLOTH,fill:'transparent',style:'pointer-events:all;cursor:crosshair'});
+  g.appendChild(ovl);
+  const avgAt=t=>{ if(!avg.length||t<avg[0].t) return null; let v=avg[0].v; for(const a of avg){ if(a.t<=t)v=a.v; else break; } return v; };
+  const nearestPrice=t=>{ let lo=0,hi=PRICE_PTS.length-1; while(lo<hi){const m=(lo+hi)>>1; if(PRICE_PTS[m].t<t)lo=m+1; else hi=m;}
+    const a=PRICE_PTS[Math.max(0,lo-1)], b=PRICE_PTS[lo]; return Math.abs(a.t-t)<=Math.abs(b.t-t)?a:b; };
+  ovl.addEventListener('mousemove',ev=>{
+    const rc=chartSvg.getBoundingClientRect();
+    let t=view.t0+((ev.clientX-rc.left)/rc.width*W-M.l)/PLOTW*(view.t1-view.t0);
+    t=Math.max(view.t0,Math.min(view.t1,t));
+    const pr=nearestPrice(t), av=avgAt(t), xx=x(pr.t);
+    while(gCross.firstChild)gCross.removeChild(gCross.firstChild);
+    gCross.appendChild(el('line',{x1:xx,x2:xx,y1:M.t,y2:H-M.b,stroke:'#ffffff55','stroke-width':1,'stroke-dasharray':'3 3'}));
+    gCross.appendChild(el('circle',{cx:xx,cy:y(pr.c),r:4,fill:'#f7931a',stroke:'#0b0e11','stroke-width':1.5}));
+    if(av!=null) gCross.appendChild(el('circle',{cx:xx,cy:y(av),r:4,fill:'#26d07c',stroke:'#0b0e11','stroke-width':1.5}));
+    tip.innerHTML=`<b>${new Date(pr.t).toLocaleDateString('it-IT')}</b>`
+      +`<div class="row"><span>Prezzo BTC</span><span>${fmtUSD(pr.c)}</span></div>`
+      +(av!=null?`<div class="row"><span>Prezzo medio</span><span style="color:#26d07c">${fmtUSD(av)}</span></div>`:'');
+    tip.style.opacity=1; moveTip(ev);
+  });
+  ovl.addEventListener('mouseleave',()=>{ while(gCross.firstChild)gCross.removeChild(gCross.firstChild); tip.style.opacity=0; });
+
   // bolle (ancorate al prezzo del giorno) — più grandi sotto, piccole sopra (cliccabili)
   const amts=r.map(p=>p.amount); const aMin=Math.min(...amts), aMax=Math.max(...amts);
   const rad=a=>4+(Math.sqrt(a)-Math.sqrt(aMin))/((Math.sqrt(aMax)-Math.sqrt(aMin))||1)*26;
@@ -352,6 +380,7 @@ function renderChart(){
     c.addEventListener('mouseleave',()=>{tip.style.opacity=0;});
     g.appendChild(c);
   });
+  svg.appendChild(gCross); // crosshair sopra a tutto (non blocca i click)
 }
 
 //---- zoom & pan ----
@@ -413,19 +442,26 @@ function renderTable(){
     return (va-vb)*sortDir;
   });
   const sg=v=>v>=0?'+':'', cls=v=>v>=0?'pos':'neg';
-  document.querySelector('#tbl tbody').innerHTML=r.map(p=>`<tr>
+  document.querySelector('#tbl tbody').innerHTML=r.map(p=>`<tr data-id="${p.id}" title="Clicca per modificare">
     <td>${p.date}</td><td>${p.ledger}</td>
     <td>${fmtNum(p.amount,8)}</td><td>${fmtNum(p.sats,0)}</td>
     <td>${fmtUSD(p.price)}</td><td>${fmtUSD(p.cost)}</td>
     <td>${fmtUSD(p.val)}</td>
     <td class="${cls(p.pnl)}">${sg(p.pnl)}${fmtUSD(p.pnl)}</td>
     <td class="${cls(p.pnl)}">${sg(p.pnlp)}${fmtNum(p.pnlp,1)}%</td>
+    <td>${p.fee?fmtEUR(p.fee):'—'}</td>
     <td class="del" data-id="${p.id}" title="Elimina">✕</td>
   </tr>`).join('');
   document.getElementById('txCount').textContent=r.length+' tx';
+  document.querySelectorAll('#tbl tbody tr').forEach(tr=>tr.onclick=ev=>{
+    if(ev.target.classList.contains('del'))return;
+    loadIntoForm(state.purchases.find(x=>x.id===tr.dataset.id));
+  });
   document.querySelectorAll('.del').forEach(d=>d.onclick=()=>{
     if(confirm('Eliminare questo acquisto?')){
+      const old=state.purchases.find(x=>x.id===d.dataset.id);
       state.purchases=state.purchases.filter(x=>x.id!==d.dataset.id); save(); renderAll();
+      if(old) pushDelete(old);
     }
   });
   const ledgers=[...new Set(state.purchases.map(p=>p.ledger))];
@@ -455,16 +491,45 @@ document.getElementById('addBtn').onclick=()=>{
   let amount=parseFloat(document.getElementById('aAmount').value);
   const price=parseFloat(document.getElementById('aPrice').value);
   const eur=parseFloat(document.getElementById('aEur').value);
+  const fee=parseFloat(document.getElementById('aFee').value)||0;
   if(!iso){alert('Inserisci la data');return;}
   if(!price){alert('Inserisci il prezzo BTC');return;}
   if(!amount && eur){amount=(eur/(+fx.value))/price;} // €→$→BTC
   if(!amount){alert('Inserisci la quantità BTC o l\'importo in €');return;}
-  const np={id:'u'+Date.now(), date:isoToDMY(iso), ledger, amount:+amount, price:+price};
-  state.purchases.push(np);
-  save(); renderAll();
-  ['aAmount','aPrice','aEur'].forEach(id=>document.getElementById(id).value='');
-  pushAdd(np); // sincronizza col foglio se collegato
+  const data={date:isoToDMY(iso), ledger, amount:+amount, price:+price, fee};
+  if(editingId){
+    const p=state.purchases.find(x=>x.id===editingId);
+    const old={date:p.date, ledger:p.ledger, amount:p.amount};
+    Object.assign(p, data); save(); renderAll();
+    pushUpdate(old, p); // aggiorna la riga sul foglio (match per data+wallet+BTC vecchi)
+    cancelEdit();
+  } else {
+    const np={id:'u'+Date.now(), ...data};
+    state.purchases.push(np); save(); renderAll();
+    ['aAmount','aPrice','aEur','aFee'].forEach(id=>document.getElementById(id).value='');
+    pushAdd(np);
+  }
 };
+function loadIntoForm(p){
+  if(!p) return; editingId=p.id;
+  const [d,m,y]=p.date.split('/');
+  document.getElementById('aDate').value=`${y}-${m}-${d}`;
+  document.getElementById('aLedger').value=p.ledger;
+  document.getElementById('aAmount').value=p.amount;
+  document.getElementById('aPrice').value=p.price;
+  document.getElementById('aEur').value='';
+  document.getElementById('aFee').value=p.fee||'';
+  document.getElementById('addBtn').textContent='💾 Salva modifiche';
+  document.getElementById('cancelEdit').style.display='';
+  document.getElementById('addBtn').closest('.card').scrollIntoView({behavior:'smooth',block:'center'});
+}
+function cancelEdit(){
+  editingId=null;
+  document.getElementById('addBtn').textContent='Aggiungi';
+  document.getElementById('cancelEdit').style.display='none';
+  ['aAmount','aPrice','aEur','aFee'].forEach(id=>document.getElementById(id).value='');
+}
+document.getElementById('cancelEdit').onclick=cancelEdit;
 
 document.getElementById('fetchLive').onclick=async()=>{
   const btn=document.getElementById('fetchLive'); btn.textContent='…';
@@ -535,7 +600,7 @@ function syncPull(){
   window[cb]=j=>{
     clearTimeout(timer); cleanup();
     if(!j.ok){alert('Errore dal foglio: '+(j.error||'?'));btn.textContent=old;return;}
-    state.purchases=j.purchases.map((p,i)=>({id:'g'+i, date:p.date, ledger:p.ledger, amount:+p.amount, price:+p.price}));
+    state.purchases=j.purchases.map((p,i)=>({id:'g'+i, date:p.date, ledger:p.ledger, amount:+p.amount, price:+p.price, fee:+(p.fee||0)}));
     save(); renderAll(); btn.textContent='✓ '+state.purchases.length+' righe';
     setTimeout(()=>btn.textContent=old,3000);
   };
@@ -545,16 +610,18 @@ function syncPull(){
   document.body.appendChild(s);
 }
 // Scrittura via POST no-cors (fire-and-forget): la riga viene aggiunta, la risposta non è leggibile
-async function pushAdd(p){
-  if(!state.sync||!state.sync.url) return; // sync opzionale
+function syncFlash(txt){ const b=document.getElementById('syncCfg'); const t=b.textContent; b.textContent=txt; setTimeout(()=>{b.textContent=t;},2000); }
+async function syncPost(payload){
+  if(!state.sync||!state.sync.url) return;
   try{
     await fetch(state.sync.url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify({action:'add',token:state.sync.token,
-        purchase:{date:p.date,ledger:p.ledger,amount:p.amount,price:p.price}})});
-    const b=document.getElementById('syncCfg'); const t=b.textContent; b.textContent='☁ Salvato ✓';
-    setTimeout(()=>{b.textContent=t;},2000);
-  }catch(e){console.warn('push fallita',e);}
+      body:JSON.stringify({token:state.sync.token, ...payload})});
+    return true;
+  }catch(e){console.warn('sync POST fallita',e); return false;}
 }
+async function pushAdd(p){ if(await syncPost({action:'add', purchase:{date:p.date,ledger:p.ledger,amount:p.amount,price:p.price,fee:p.fee||0}})) syncFlash('☁ Salvato ✓'); }
+async function pushUpdate(old,p){ if(await syncPost({action:'update', match:{date:old.date,ledger:old.ledger,amount:old.amount}, set:{date:p.date,ledger:p.ledger,amount:p.amount,price:p.price,fee:p.fee||0}})) syncFlash('☁ Modificato ✓'); }
+async function pushDelete(old){ if(await syncPost({action:'delete', match:{date:old.date,ledger:old.ledger,amount:old.amount}})) syncFlash('☁ Eliminato ✓'); }
 document.getElementById('syncCfg').onclick=syncCfgOpen;
 document.getElementById('syncPull').onclick=syncPull;
 updateSyncUI();
